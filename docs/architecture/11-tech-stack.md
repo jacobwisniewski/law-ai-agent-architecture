@@ -26,7 +26,7 @@ This document outlines the specific packages and libraries chosen for implementa
 | Layer | Technology | Why |
 |-------|------------|-----|
 | **Frontend** | Vite + React | Fast dev, no SSR needed for auth-gated SPA |
-| **UI Components** | shadcn/ui + Radix | Accessible, fully customizable, CSS var theming |
+| **UI Components** | Radix UI + styled-components | Accessible primitives, full styling control |
 | **API** | Fastify + tRPC | Type-safe client/server, fast, good for streaming |
 | **Database** | PostgreSQL + pgvector | Relational + vector search in one |
 | **ORM** | Kysely | Type-safe query builder, close to SQL, flexible |
@@ -221,42 +221,82 @@ const similar = await db
 
 ---
 
-## Frontend: Vite + React + shadcn/ui
+## Frontend: Vite + React + Radix UI + styled-components
 
 | Aspect | Details |
 |--------|---------|
 | Bundler | Vite |
 | Framework | React 18 |
-| UI | shadcn/ui (Radix primitives) |
-| Styling | Tailwind CSS |
+| UI Primitives | Radix UI (unstyled, accessible) |
+| Styling | styled-components |
 | State | TanStack Query (via tRPC) |
 
-**Why shadcn/ui:**
+**Why Radix UI + styled-components:**
 
-1. **Copy, don't install** - Components in your codebase, full control
-2. **Radix primitives** - Accessible, keyboard nav, screen reader support
-3. **CSS variables theming** - Easy custom themes
-4. **Tailwind native** - Consistent with our styling approach
+1. **Radix primitives** - Accessible, keyboard nav, screen reader support, unstyled
+2. **styled-components** - Familiar CSS-in-JS, full styling control
+3. **No utility classes** - Write actual CSS
+4. **Theming** - styled-components ThemeProvider for design tokens
 
 **Theming:**
 
-```css
-/* apps/web/src/styles/globals.css */
-@layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    /* ... customize all colors */
-  }
+```typescript
+// apps/web/src/styles/theme.ts
+export const theme = {
+  colors: {
+    background: "#ffffff",
+    foreground: "#0a0a0a",
+    primary: "#3b82f6",
+    primaryForeground: "#ffffff",
+    muted: "#f5f5f5",
+    border: "#e5e5e5",
+  },
+  radii: {
+    sm: "4px",
+    md: "8px",
+    lg: "12px",
+  },
+  fonts: {
+    body: "Inter, system-ui, sans-serif",
+    mono: "JetBrains Mono, monospace",
+  },
+};
 
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    /* ... dark mode colors */
-  }
+// apps/web/src/App.tsx
+import { ThemeProvider } from "styled-components";
+import { theme } from "./styles/theme";
+
+function App() {
+  return (
+    <ThemeProvider theme={theme}>
+      {/* ... */}
+    </ThemeProvider>
+  );
 }
+```
+
+**Radix + styled-components example:**
+
+```typescript
+import * as Dialog from "@radix-ui/react-dialog";
+import styled from "styled-components";
+
+const Overlay = styled(Dialog.Overlay)`
+  background: rgba(0, 0, 0, 0.5);
+  position: fixed;
+  inset: 0;
+`;
+
+const Content = styled(Dialog.Content)`
+  background: ${({ theme }) => theme.colors.background};
+  border-radius: ${({ theme }) => theme.radii.lg};
+  padding: 24px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+`;
 ```
 
 ---
