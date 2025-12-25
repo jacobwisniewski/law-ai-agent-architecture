@@ -4,17 +4,76 @@
 
 This document outlines the specific packages and libraries chosen for implementation. All packages are actively maintained, well-documented, and have strong TypeScript support.
 
+## Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           MONOREPO STRUCTURE                                 │
+│                                                                             │
+│  /apps                                                                      │
+│    /web          Vite + React + tRPC client + TanStack Query               │
+│    /api          Fastify + tRPC + BullMQ workers                           │
+│                                                                             │
+│  /packages                                                                  │
+│    /db           Kysely schema + migrations                                 │
+│    /shared       Zod schemas, shared types                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Core Stack
+
+| Layer | Technology | Why |
+|-------|------------|-----|
+| **Frontend** | Vite + React | Fast dev, no SSR needed for auth-gated SPA |
+| **UI Components** | shadcn/ui + Radix | Accessible, fully customizable, CSS var theming |
+| **API** | Fastify + tRPC | Type-safe client/server, fast, good for streaming |
+| **Database** | PostgreSQL + pgvector | Relational + vector search in one |
+| **ORM** | Kysely | Type-safe query builder, close to SQL, flexible |
+| **Migrations** | kysely-ctl | Simple, TypeScript-native |
+| **Cache/Queue** | Redis | Sessions, ACL cache, BullMQ backend |
+| **Job Queue** | BullMQ | Background jobs, retries, scheduling |
+| **Auth** | Better Auth | Multi-tenant, SSO-ready, framework-agnostic |
+| **Validation** | Zod | Shared schemas between client/server |
+| **Monorepo** | pnpm workspaces | Simple, fast, no extra tooling |
+| **Runtime** | Node.js | Stability, ecosystem compatibility |
+| **Logging** | Pino | Fast structured logging, Fastify native |
+
+## Infrastructure (AWS ap-southeast-2)
+
+| Service | AWS Resource | Notes |
+|---------|--------------|-------|
+| **API + Workers** | ECS Fargate | Serverless containers, no timeout limits |
+| **Database** | RDS PostgreSQL | pgvector extension enabled |
+| **Cache/Queue** | ElastiCache Redis | Sessions, ACL cache, BullMQ |
+| **Logs** | CloudWatch Logs | Pino JSON → CloudWatch |
+| **Metrics** | CloudWatch Metrics | Built-in, no extra infra |
+| **Alerts** | CloudWatch Alarms | SNS for notifications |
+| **Secrets** | AWS Secrets Manager | API keys, tokens |
+| **CDN** | CloudFront | Static frontend assets |
+| **Storage** | S3 | Document cache (optional) |
+
 ## Core Dependencies
 
 ```json
 {
   "dependencies": {
+    "@trpc/server": "^11.0.0",
+    "@trpc/client": "^11.0.0",
+    "@trpc/react-query": "^11.0.0",
+    "@tanstack/react-query": "^5.0.0",
+    "fastify": "^5.0.0",
+    "kysely": "^0.27.0",
+    "pg": "^8.0.0",
     "better-auth": "^1.4.0",
+    "bullmq": "^5.0.0",
+    "ioredis": "^5.0.0",
+    "zod": "^3.23.0",
+    "pino": "^9.0.0",
     "langchain": "^0.3.0",
     "@langchain/openai": "^0.3.0",
     "@langchain/community": "^0.3.0",
     "@microsoft/microsoft-graph-client": "^3.0.0",
-    "bullmq": "^5.0.0",
     "stripe": "^17.0.0",
     "pdfjs-dist": "^4.0.0",
     "tesseract.js": "^5.0.0",
@@ -27,35 +86,294 @@ This document outlines the specific packages and libraries chosen for implementa
 }
 ```
 
-## Package Decisions by Category
+---
 
-### Authentication: Better Auth
+## Type-Safe Client/Server: tRPC
+
+| Aspect | Details |
+|--------|---------|
+| Package | `@trpc/server`, `@trpc/client`, `@trpc/react-query` |
+| Why | End-to-end type safety without codegen |
+
+**Why tRPC over REST + OpenAPI:**
+
+1. **Zero codegen** - Change backend, frontend types update instantly
+2. **Full inference** - Input/output types flow automatically
+3. **React Query integration** - Built-in caching, mutations, optimistic updates
+4. **Streaming support** - SSE subscriptions for chat
+5. **Fastify adapter** - Works with our backend choice
+
+**Example:**
+
+```typescript
+// packages/shared/src/schemas.ts
+import { z } from "zod";
+
+export const searchSchema = z.object({
+  query: z.string().min(1),
+  filters: z.object({
+    dateFrom: z.date().optional(),
+    documentTypes: z.array(z.string()).optional(),
+  }).optional(),
+  limit: z.number().min(1).max(100).default(20),
+});
+
+// apps/api/src/routers/search.ts
+import { router, protectedProcedure } from "../trpc";
+import { searchSchema } from "@law-ai/shared";
+
+export const searchRouter = router({
+  search: protectedProcedure
+    .input(searchSchema)
+    .query(async ({ input, ctx }) => {
+      const results = await searchService.search(input, ctx.user, ctx.tenant);
+      return results; // Type flows to client automatically
+    }),
+});
+
+// apps/web/src/pages/Search.tsx
+import { trpc } from "../utils/trpc";
+
+function SearchPage() {
+  const { data, isLoading } = trpc.search.search.useQuery({
+    query: "contract terms",
+    limit: 10,
+  }); // Full type inference on `data`
+}
+```
+
+---
+
+## Database: Kysely
+
+| Aspect | Details |
+|--------|---------|
+| Package | `kysely`, `pg` |
+| Why | Type-safe SQL, lightweight, great for pgvector |
+
+**Why Kysely over Prisma/Drizzle:**
+
+1. **Close to SQL** - Query builder, not ORM abstraction
+2. **Type-safe** - Full TypeScript inference
+3. **pgvector friendly** - Easy raw SQL for vector operations
+4. **Lightweight** - No heavy runtime, no codegen step
+5. **Flexible** - Can drop to raw SQL when needed
+
+**Example:**
+
+```typescript
+// packages/db/src/schema.ts
+import { Generated, ColumnType } from "kysely";
+
+export interface Database {
+  tenants: TenantsTable;
+  users: UsersTable;
+  documents: DocumentsTable;
+  document_chunks: DocumentChunksTable;
+}
+
+export interface TenantsTable {
+  id: Generated<string>;
+  slug: string;
+  name: string;
+  status: "trialing" | "active" | "suspended" | "cancelled";
+  created_at: Generated<Date>;
+}
+
+export interface DocumentChunksTable {
+  id: Generated<string>;
+  document_id: string;
+  tenant_id: string;
+  content: string;
+  embedding: number[] | null; // pgvector
+  chunk_index: number;
+}
+
+// packages/db/src/db.ts
+import { Kysely, PostgresDialect } from "kysely";
+import { Pool } from "pg";
+import { Database } from "./schema";
+
+export const db = new Kysely<Database>({
+  dialect: new PostgresDialect({
+    pool: new Pool({ connectionString: process.env.DATABASE_URL }),
+  }),
+});
+
+// Type-safe queries
+const docs = await db
+  .selectFrom("documents")
+  .where("tenant_id", "=", tenantId)
+  .where("status", "=", "indexed")
+  .selectAll()
+  .execute();
+
+// Raw SQL for pgvector
+const similar = await db
+  .selectFrom("document_chunks")
+  .where("tenant_id", "=", tenantId)
+  .select(["id", "content", "document_id"])
+  .select(sql<number>`embedding <=> ${embedding}`.as("distance"))
+  .orderBy("distance")
+  .limit(20)
+  .execute();
+```
+
+---
+
+## Frontend: Vite + React + shadcn/ui
+
+| Aspect | Details |
+|--------|---------|
+| Bundler | Vite |
+| Framework | React 18 |
+| UI | shadcn/ui (Radix primitives) |
+| Styling | Tailwind CSS |
+| State | TanStack Query (via tRPC) |
+
+**Why shadcn/ui:**
+
+1. **Copy, don't install** - Components in your codebase, full control
+2. **Radix primitives** - Accessible, keyboard nav, screen reader support
+3. **CSS variables theming** - Easy custom themes
+4. **Tailwind native** - Consistent with our styling approach
+
+**Theming:**
+
+```css
+/* apps/web/src/styles/globals.css */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    /* ... customize all colors */
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    /* ... dark mode colors */
+  }
+}
+```
+
+---
+
+## Job Queue: BullMQ
+
+| Aspect | Details |
+|--------|---------|
+| Package | `bullmq` |
+| Backend | Redis |
+| Why | Background processing for sync, embeddings |
+
+**What needs background processing:**
+
+- Document sync from M365 (can take hours for initial)
+- Embedding generation (batched API calls)
+- ACL expansion (group membership resolution)
+- Webhook processing
+- Email notifications
+
+**Embedding Batching:**
+
+```typescript
+import { Queue, Worker } from "bullmq";
+
+const embeddingQueue = new Queue("embeddings", {
+  connection: redis,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 5000 },
+  },
+});
+
+// Batch processor - accumulate chunks, flush in batches
+const worker = new Worker("embeddings", async (job) => {
+  const { chunks } = job.data; // Array of chunks to embed
+  
+  // OpenAI supports up to 2048 texts per call
+  // We batch at 100-500 for balance of efficiency and memory
+  const BATCH_SIZE = 100;
+  
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+    const embeddings = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: batch.map(c => c.content),
+    });
+    
+    // Store embeddings
+    await db.transaction().execute(async (trx) => {
+      for (let j = 0; j < batch.length; j++) {
+        await trx
+          .updateTable("document_chunks")
+          .set({ embedding: embeddings.data[j].embedding })
+          .where("id", "=", batch[j].id)
+          .execute();
+      }
+    });
+  }
+}, { connection: redis, concurrency: 2 });
+```
+
+---
+
+## Logging: Pino → CloudWatch
+
+| Aspect | Details |
+|--------|---------|
+| Package | `pino`, `pino-pretty` (dev) |
+| Production | JSON logs → CloudWatch Logs |
+
+**Setup:**
+
+```typescript
+// apps/api/src/logger.ts
+import pino from "pino";
+
+export const logger = pino({
+  level: process.env.LOG_LEVEL || "info",
+  ...(process.env.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: { colorize: true },
+    },
+  }),
+});
+
+// Fastify uses Pino natively
+const app = fastify({ logger });
+
+// Structured logging
+logger.info({ tenantId, userId, query }, "Search executed");
+logger.error({ err, documentId }, "Document processing failed");
+```
+
+**CloudWatch:**
+
+ECS Fargate automatically sends stdout/stderr to CloudWatch Logs. Pino's JSON format makes logs searchable via CloudWatch Logs Insights:
+
+```sql
+-- CloudWatch Logs Insights query
+fields @timestamp, tenantId, userId, message
+| filter level = "error"
+| sort @timestamp desc
+| limit 100
+```
+
+---
+
+## Authentication: Better Auth
 
 | Aspect | Details |
 |--------|---------|
 | Package | `better-auth` |
-| Stars | 24.4k |
-| License | MIT |
-| Website | https://better-auth.com |
+| Why | Multi-tenant, framework-agnostic, SSO-ready |
 
-**Why Better Auth over Auth.js/NextAuth:**
-
-1. **TypeScript-first** - Better type inference and DX
-2. **Framework-agnostic** - Works with Next.js, Fastify, Express, etc.
-3. **Built-in multi-tenancy** - Plugin for organization/tenant support
-4. **Enterprise features** - SSO, SAML, OIDC built-in as plugins
-5. **2FA/Passkeys** - First-class support via plugins
-6. **Active development** - Very active, 695+ contributors
-
-**Key Features We'll Use:**
-
-- Email/password authentication (MVP)
-- Organization plugin (multi-tenancy)
-- Session management
-- Microsoft OAuth (for M365 connection)
-- SSO plugin (post-MVP: Okta, Azure AD)
-
-**Example Setup:**
+**Setup with Fastify:**
 
 ```typescript
 import { betterAuth } from "better-auth";
@@ -85,308 +403,45 @@ export const auth = betterAuth({
 
 ---
 
-### RAG & AI: LangChain.js
+## RAG & AI: LangChain.js
 
 | Aspect | Details |
 |--------|---------|
 | Package | `langchain`, `@langchain/openai`, `@langchain/community` |
-| Stars | 16.6k |
-| License | MIT |
-| Docs | https://js.langchain.com |
+| Why | Comprehensive RAG pipeline, streaming, pgvector support |
 
-**Why LangChain:**
+**What LangChain handles:**
 
-1. **Comprehensive RAG pipeline** - Handles retrieval, context building, generation
-2. **Text splitters** - Built-in semantic chunking with overlap
-3. **Vector store integrations** - PGVector support out of the box
-4. **Embeddings abstraction** - Easy to swap embedding providers
-5. **Streaming support** - Built-in streaming for chat responses
-6. **Document loaders** - PDF, DOCX, HTML loaders included
-
-**What LangChain Replaces:**
-
-| Our Custom Code | LangChain Alternative |
-|-----------------|----------------------|
-| Chunking logic | `RecursiveCharacterTextSplitter` |
-| Embedding calls | `OpenAIEmbeddings` |
-| Vector queries | `PGVectorStore` |
+| Task | LangChain Component |
+|------|---------------------|
+| Chunking | `RecursiveCharacterTextSplitter` |
+| Embeddings | `OpenAIEmbeddings` |
+| Vector store | `PGVectorStore` |
 | Hybrid search | `EnsembleRetriever` |
 | RAG chain | `RetrievalQAChain` |
-| Streaming | Built-in `streamEvents` |
-
-**Example Setup:**
-
-```typescript
-import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
-import { PGVectorStore } from "@langchain/community/vectorstores/pgvector";
-import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
-
-// Embeddings
-const embeddings = new OpenAIEmbeddings({
-  model: "text-embedding-3-small",
-  dimensions: 1536,
-});
-
-// Vector store
-const vectorStore = await PGVectorStore.initialize(embeddings, {
-  postgresConnectionOptions: {
-    connectionString: process.env.DATABASE_URL,
-  },
-  tableName: "document_chunks",
-  columns: {
-    idColumnName: "id",
-    vectorColumnName: "embedding",
-    contentColumnName: "content",
-    metadataColumnName: "metadata",
-  },
-});
-
-// Text splitting
-const splitter = new RecursiveCharacterTextSplitter({
-  chunkSize: 500,
-  chunkOverlap: 50,
-  separators: ["\n\n", "\n", ". ", " ", ""],
-});
-
-// LLM
-const llm = new ChatOpenAI({
-  model: "gpt-4.1",
-  temperature: 0.1,
-  streaming: true,
-});
-```
+| Streaming | `streamEvents` |
 
 ---
 
-### Document Extraction
+## Document Extraction
 
-| Package | Purpose | Stars | Notes |
-|---------|---------|-------|-------|
-| `pdfjs-dist` | PDF text extraction | 52.5k | Mozilla, industry standard |
-| `tesseract.js` | OCR for scanned docs | 37.6k | WebAssembly Tesseract |
-| `mammoth` | DOCX to HTML/text | 6k | Simple, preserves structure |
-| `mailparser` | Email parsing | 1.7k | MIME, attachments, streaming |
-| `html-to-text` | HTML stripping | 1.7k | Clean text from emails |
-
-**LangChain also provides document loaders**, but these packages give more control:
-
-```typescript
-// PDF extraction
-import { getDocument } from "pdfjs-dist";
-
-async function extractPdfText(buffer: Buffer): Promise<string> {
-  const pdf = await getDocument({ data: buffer }).promise;
-  const pages: string[] = [];
-  
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const text = content.items.map((item: any) => item.str).join(" ");
-    pages.push(text);
-  }
-  
-  return pages.join("\n\n");
-}
-
-// DOCX extraction
-import mammoth from "mammoth";
-
-async function extractDocxText(buffer: Buffer): Promise<string> {
-  const result = await mammoth.extractRawText({ buffer });
-  return result.value;
-}
-
-// Email parsing
-import { simpleParser } from "mailparser";
-import { convert } from "html-to-text";
-
-async function extractEmailText(raw: string): Promise<string> {
-  const parsed = await simpleParser(raw);
-  const body = parsed.html 
-    ? convert(parsed.html, { wordwrap: false })
-    : parsed.text || "";
-  return body;
-}
-```
+| Package | Purpose | Notes |
+|---------|---------|-------|
+| `pdfjs-dist` | PDF text extraction | Mozilla, industry standard |
+| `tesseract.js` | OCR for scanned docs | WebAssembly Tesseract |
+| `mammoth` | DOCX to HTML/text | Simple, preserves structure |
+| `mailparser` | Email parsing | MIME, attachments, streaming |
+| `html-to-text` | HTML stripping | Clean text from emails |
 
 ---
 
-### Microsoft 365 Integration
-
-| Aspect | Details |
-|--------|---------|
-| Package | `@microsoft/microsoft-graph-client` |
-| Stars | 812 |
-| License | MIT |
-| Docs | https://learn.microsoft.com/graph |
-
-**Official SDK** - Best support for Graph API features:
-
-```typescript
-import { Client } from "@microsoft/microsoft-graph-client";
-
-const client = Client.initWithMiddleware({
-  authProvider: {
-    getAccessToken: async () => accessToken,
-  },
-});
-
-// Delta sync for documents
-const delta = await client
-  .api("/drives/{driveId}/root/delta")
-  .get();
-
-// Get file content
-const content = await client
-  .api("/drives/{driveId}/items/{itemId}/content")
-  .get();
-
-// Get permissions
-const permissions = await client
-  .api("/drives/{driveId}/items/{itemId}/permissions")
-  .get();
-```
-
----
-
-### Job Queue: BullMQ
-
-| Aspect | Details |
-|--------|---------|
-| Package | `bullmq` |
-| Stars | 8.1k |
-| License | MIT |
-| Backend | Redis |
-
-**Already in architecture docs** - Best Redis-based queue for Node.js:
-
-```typescript
-import { Queue, Worker } from "bullmq";
-
-const ingestionQueue = new Queue("ingestion", {
-  connection: { host: "localhost", port: 6379 },
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 5000 },
-  },
-});
-
-const worker = new Worker("ingestion", async (job) => {
-  switch (job.name) {
-    case "process_document":
-      await processDocument(job.data);
-      break;
-    case "sync_tenant":
-      await syncTenant(job.data);
-      break;
-  }
-}, {
-  connection: { host: "localhost", port: 6379 },
-  concurrency: 5,
-});
-```
-
----
-
-### Rate Limiting
-
-| Aspect | Details |
-|--------|---------|
-| Package | `rate-limiter-flexible` |
-| Stars | 3.4k |
-| License | ISC |
-| Backends | Redis, PostgreSQL, Memory |
-
-**Better than rolling our own:**
-
-```typescript
-import { RateLimiterRedis } from "rate-limiter-flexible";
-import Redis from "ioredis";
-
-const redis = new Redis();
-
-const searchLimiter = new RateLimiterRedis({
-  storeClient: redis,
-  keyPrefix: "rl:search",
-  points: 60,      // requests
-  duration: 60,    // per minute
-});
-
-const chatLimiter = new RateLimiterRedis({
-  storeClient: redis,
-  keyPrefix: "rl:chat",
-  points: 20,      // requests
-  duration: 60,    // per minute
-});
-
-// Usage in API route
-async function searchHandler(req, res) {
-  try {
-    await searchLimiter.consume(req.user.id);
-    // ... handle search
-  } catch (err) {
-    res.status(429).json({ error: "Too many requests" });
-  }
-}
-```
-
----
-
-### Billing: Stripe
-
-| Aspect | Details |
-|--------|---------|
-| Package | `stripe` |
-| Stars | 4.3k |
-| License | MIT |
-
-**Official SDK** - Already in architecture docs, no change needed.
-
----
-
-## What We're NOT Using
-
-### CASL (Authorization Library)
-
-**What it is:** CASL is an isomorphic authorization library for checking "can user X do action Y on resource Z".
-
-**Why we're skipping it:**
-
-1. **Overkill for our ACL model** - Our permissions are simple: user has access to document (yes/no) based on M365 sync
-2. **Performance overhead** - CASL's MongoDB-style conditions add abstraction we don't need
-3. **Our ACL is simpler** - Just check if `userId` is in `allowed_user_ids` array
-
-**Our approach instead:**
-
-```typescript
-// Simple ACL check - no CASL needed
-async function canAccessDocument(
-  userId: string, 
-  documentId: string,
-  tenantId: string
-): Promise<boolean> {
-  const acl = await db.expandedAcls.findFirst({
-    where: { 
-      tenantId,
-      resourceId: documentId,
-    },
-  });
-  
-  return acl?.allowedUserIds.includes(userId) ?? false;
-}
-```
-
-If we need complex role-based permissions later (e.g., "partners can see all matters, associates only their assigned"), we can add CASL then.
-
----
-
-## Embedding Model Configuration
+## Embedding Configuration
 
 | Setting | Value | Notes |
 |---------|-------|-------|
 | Model | `text-embedding-3-small` | Cost-effective, good quality |
 | Dimensions | 1536 | Default for this model |
-| Batch size | 100 | Max texts per API call |
+| Batch size | 100-500 | Balance efficiency and memory |
 
 **Cost Estimate:**
 - ~$0.02 per 1M tokens
@@ -395,11 +450,68 @@ If we need complex role-based permissions later (e.g., "partners can see all mat
 
 ---
 
-## Package Version Policy
+## What We're NOT Using
 
-- **Pin major versions** in package.json
-- **Renovate/Dependabot** for automated updates
-- **Weekly update review** for security patches
+### Next.js
+
+**Why not:** No SSR needed for auth-gated SPA. Vite + separate Fastify API gives cleaner separation, better for long-running workers.
+
+### Prisma/Drizzle
+
+**Why not:** Kysely is closer to SQL, better for pgvector raw queries, lighter weight.
+
+### Bun
+
+**Why not:** Node.js has better ecosystem compatibility for BullMQ, Better Auth, etc. Stability over speed.
+
+### CASL
+
+**Why not:** Our ACL model is simple (user in allowed_user_ids array). CASL adds overhead we don't need.
+
+---
+
+## Project Structure
+
+```
+law-ai-platform/
+├── apps/
+│   ├── web/                    # Vite + React frontend
+│   │   ├── src/
+│   │   │   ├── components/     # shadcn/ui components
+│   │   │   ├── pages/
+│   │   │   ├── utils/
+│   │   │   │   └── trpc.ts     # tRPC client setup
+│   │   │   └── main.tsx
+│   │   ├── index.html
+│   │   └── vite.config.ts
+│   │
+│   └── api/                    # Fastify + tRPC backend
+│       ├── src/
+│       │   ├── routers/        # tRPC routers
+│       │   ├── services/       # Business logic
+│       │   ├── workers/        # BullMQ workers
+│       │   ├── connectors/     # M365, etc.
+│       │   ├── trpc.ts         # tRPC setup
+│       │   └── index.ts        # Fastify entry
+│       └── tsconfig.json
+│
+├── packages/
+│   ├── db/                     # Kysely schema + migrations
+│   │   ├── src/
+│   │   │   ├── schema.ts       # Type definitions
+│   │   │   ├── db.ts           # Kysely instance
+│   │   │   └── migrations/
+│   │   └── kysely.config.ts
+│   │
+│   └── shared/                 # Shared types + schemas
+│       └── src/
+│           ├── schemas/        # Zod schemas
+│           └── types/          # Shared TypeScript types
+│
+├── pnpm-workspace.yaml
+├── package.json
+└── tsconfig.base.json
+```
 
 ---
 
@@ -412,25 +524,55 @@ pnpm install
 # Environment variables
 cp .env.example .env.local
 
-# Required env vars:
-# DATABASE_URL=postgresql://...
-# REDIS_URL=redis://...
-# OPENAI_API_KEY=sk-...
-# BETTER_AUTH_SECRET=...
-# STRIPE_SECRET_KEY=sk_...
-# STRIPE_WEBHOOK_SECRET=whsec_...
+# Start services (Docker)
+docker-compose up -d  # PostgreSQL + Redis
 
-# App URLs
-# APP_URL=http://localhost:3000
+# Run migrations
+pnpm --filter @law-ai/db migrate:latest
+
+# Start dev servers
+pnpm dev  # Runs both web and api in parallel
+```
+
+### Environment Variables
+
+```bash
+# Database
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/law_ai
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Auth
+BETTER_AUTH_SECRET=...
+BETTER_AUTH_URL=http://localhost:3001
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
 
 # M365 Platform Auth (for "Login with Microsoft")
-# MS_CLIENT_ID=...
-# MS_CLIENT_SECRET=...
+MS_CLIENT_ID=...
+MS_CLIENT_SECRET=...
 
-# M365 Connector (separate app for data access - see 12-auth-architecture.md)
-# MS_CONNECTOR_CLIENT_ID=...
-# MS_CONNECTOR_CLIENT_SECRET=...
+# M365 Connector (separate app for data access)
+MS_CONNECTOR_CLIENT_ID=...
+MS_CONNECTOR_CLIENT_SECRET=...
 
-# Token encryption (32-byte hex key for AES-256-GCM)
-# TOKEN_ENCRYPTION_KEY=...
+# Token encryption
+TOKEN_ENCRYPTION_KEY=...  # 32-byte hex
+
+# AWS (production)
+AWS_REGION=ap-southeast-2
 ```
+
+---
+
+## Package Version Policy
+
+- **Pin major versions** in package.json
+- **Renovate/Dependabot** for automated updates
+- **Weekly update review** for security patches
