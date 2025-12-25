@@ -70,10 +70,10 @@ CREATE TABLE tenants (
   slug VARCHAR(100) NOT NULL UNIQUE,
   name VARCHAR(255) NOT NULL,
   
-  status VARCHAR(50) NOT NULL DEFAULT 'trialing',
-    -- 'trialing' | 'active' | 'suspended' | 'cancelled'
+  status VARCHAR(50) NOT NULL DEFAULT 'active',
+    -- 'active' | 'suspended' | 'cancelled'
   
-  plan_id VARCHAR(50) NOT NULL DEFAULT 'trial',
+  plan_id VARCHAR(50) NOT NULL DEFAULT 'starter',
   seats_included INTEGER NOT NULL DEFAULT 5,
   seats_used INTEGER NOT NULL DEFAULT 0,
   
@@ -677,11 +677,10 @@ CREATE TABLE subscriptions (
   stripe_customer_id VARCHAR(255) NOT NULL,
   stripe_subscription_id VARCHAR(255) NOT NULL,
   stripe_seat_item_id VARCHAR(255),
-  stripe_overage_item_id VARCHAR(255),
   
   plan_id VARCHAR(50) NOT NULL,
   status VARCHAR(50) NOT NULL DEFAULT 'active',
-    -- 'trialing' | 'active' | 'past_due' | 'cancelled'
+    -- 'active' | 'past_due' | 'cancelled'
   
   -- Billing cycle
   current_period_start TIMESTAMPTZ,
@@ -694,7 +693,6 @@ CREATE TABLE subscriptions (
   -- Credits
   credits_included INTEGER NOT NULL DEFAULT 5000,
   credits_used INTEGER NOT NULL DEFAULT 0,
-  credits_overage INTEGER NOT NULL DEFAULT 0,
   
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -736,8 +734,6 @@ CREATE TABLE invoices (
   period_end TIMESTAMPTZ NOT NULL,
   
   seats_amount INTEGER NOT NULL DEFAULT 0,
-  overage_credits INTEGER NOT NULL DEFAULT 0,
-  overage_amount INTEGER NOT NULL DEFAULT 0,
   total_amount INTEGER NOT NULL DEFAULT 0,  -- In cents
   
   status VARCHAR(50) NOT NULL DEFAULT 'draft',

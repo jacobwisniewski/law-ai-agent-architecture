@@ -8,11 +8,15 @@ Per-seat pricing with usage credits. Simple to understand, scales with firm size
 
 ### Plans
 
-| Plan | Monthly/Seat | Seats | Credits/Month | Overage |
-|------|-------------|-------|---------------|---------|
-| Starter | $49 | 1-10 | 5,000 | $10/1000 |
-| Professional | $39 | 11-50 | 10,000 | $8/1000 |
-| Enterprise | Custom | 50+ | Custom | Custom |
+| Plan | Monthly/Seat | Seats | Credits/Month |
+|------|-------------|-------|---------------|
+| Starter | $49 | 1-10 | 5,000 |
+| Professional | $39 | 11-50 | 10,000 |
+| Enterprise | Custom | 50+ | Custom |
+
+**No free trial** - users pay from day one.
+
+**Hard limits** - when credits or seats are exhausted, usage is blocked until next billing cycle or upgrade. No overage billing.
 
 ### Credit Costs
 
@@ -44,7 +48,7 @@ interface Subscription {
   
   // Plan details
   planId: string;
-  status: 'trialing' | 'active' | 'past_due' | 'cancelled';
+  status: 'active' | 'past_due' | 'cancelled';
   
   // Billing cycle
   currentPeriodStart: Date;
@@ -57,7 +61,6 @@ interface Subscription {
   // Credits
   creditsIncluded: number;      // Per period
   creditsUsed: number;          // This period
-  creditsOverage: number;       // Billed at period end
 }
 
 interface UsageEvent {
@@ -85,8 +88,6 @@ interface Invoice {
   
   // Line items
   seatsAmount: number;
-  overageCredits: number;
-  overageAmount: number;
   totalAmount: number;
   
   // Status
@@ -181,7 +182,6 @@ async function handleInvoicePaid(invoice: Stripe.Invoice): Promise<void> {
     where: { tenantId },
     data: {
       creditsUsed: 0,
-      creditsOverage: 0,
       currentPeriodStart: new Date(invoice.period_start * 1000),
       currentPeriodEnd: new Date(invoice.period_end * 1000),
     },
@@ -250,44 +250,53 @@ async function checkQuota(tenantId: string): Promise<QuotaStatus> {
   const used = await redis.get(`credits:${tenantId}:used`) || 0;
   
   const remaining = subscription.creditsIncluded - used;
-  const allowOverage = subscription.planId !== 'starter';  // Starter has hard limit
   
   return {
     remaining,
-    allowOverage,
-    isOverQuota: remaining <= 0 && !allowOverage,
+    isOverQuota: remaining <= 0,
   };
+}
+
+// Enforce quota - call before any metered operation
+async function enforceQuota(tenantId: string): Promise<void> {
+  const quota = await checkQuota(tenantId);
+  
+  if (quota.isOverQuota) {
+    throw new QuotaExceededError(
+      'Credit limit reached. Please wait for your next billing cycle or upgrade your plan.'
+    );
+  }
 }
 ```
 
-### Overage Billing
+### Quota Exceeded Handling
 
-At period end, report overage to Stripe:
+When credits are exhausted:
 
 ```typescript
-// Cron job: daily or at period end
-async function reportOverageToStripe(): Promise<void> {
-  const subscriptions = await db.subscriptions.findMany({
-    where: { status: 'active' },
-  });
-  
-  for (const sub of subscriptions) {
-    const used = await redis.get(`credits:${sub.tenantId}:used`) || 0;
-    const overage = Math.max(0, used - sub.creditsIncluded);
-    
-    if (overage > 0) {
-      // Report to Stripe as metered usage
-      await stripe.subscriptionItems.createUsageRecord(
-        sub.stripeOverageItemId,
-        {
-          quantity: overage,
-          timestamp: Math.floor(Date.now() / 1000),
-          action: 'set',
-        }
-      );
-    }
+class QuotaExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QuotaExceededError';
   }
 }
+
+// In search endpoint
+async function handleSearch(req: Request): Promise<Response> {
+  try {
+    await enforceQuota(req.tenantId);
+    // ... perform search
+  } catch (error) {
+    if (error instanceof QuotaExceededError) {
+      return Response.json(
+        { error: 'quota_exceeded', message: error.message },
+        { status: 402 }
+      );
+    }
+    throw error;
+  }
+}
+```
 ```
 
 ## Seat Management
@@ -359,10 +368,6 @@ interface BillingDashboard {
   creditsUsed: number;
   creditsTotal: number;
   creditsRemaining: number;
-  
-  // Projected overage
-  projectedOverage: number;
-  projectedOverageCost: number;
   
   // Usage breakdown
   usageByType: {

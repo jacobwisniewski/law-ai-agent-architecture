@@ -13,7 +13,7 @@ interface Tenant {
   name: string;                 // Display name
   
   // Status
-  status: 'trialing' | 'active' | 'suspended' | 'cancelled';
+  status: 'active' | 'suspended' | 'cancelled';
   createdAt: Date;
   
   // Subscription (see subscriptions table for full billing details)
@@ -284,8 +284,8 @@ async function createTenant(input: CreateTenantInput): Promise<Tenant> {
       id: uuid(),
       slug: generateSlug(input.organizationName),
       name: input.organizationName,
-      status: 'trialing',
-      planId: 'trial',
+      status: 'active',
+      planId: 'starter',
       seatsIncluded: 5,
       seatsUsed: 1,
       settings: defaultSettings(),

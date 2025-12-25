@@ -176,7 +176,7 @@ export interface TenantsTable {
   id: Generated<string>;
   slug: string;
   name: string;
-  status: "trialing" | "active" | "suspended" | "cancelled";
+  status: "active" | "suspended" | "cancelled";
   created_at: Generated<Date>;
 }
 
